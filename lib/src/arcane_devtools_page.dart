@@ -4,7 +4,7 @@ import "package:arcane_framework_devtools_extension/src/panels/feature_flags_pan
 import "package:arcane_framework_devtools_extension/src/panels/logging_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/overview_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/theme_panel.dart";
-import "package:material_ui/material_ui.dart";
+import "package:flutter/material.dart";
 
 class ArcaneDevToolsPage extends StatefulWidget {
   const ArcaneDevToolsPage({super.key});

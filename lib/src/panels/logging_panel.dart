@@ -2,7 +2,7 @@ import "dart:async";
 
 import "package:arcane_framework/arcane_framework.dart";
 import "package:arcane_framework_devtools_extension/src/common/shared_widgets.dart";
-import "package:material_ui/material_ui.dart";
+import "package:flutter/material.dart";
 
 class LoggingPanel extends StatefulWidget {
   const LoggingPanel({super.key});

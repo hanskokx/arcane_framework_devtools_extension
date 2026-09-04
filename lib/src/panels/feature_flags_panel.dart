@@ -1,6 +1,6 @@
 import "package:arcane_framework/arcane_framework.dart";
 import "package:arcane_framework_devtools_extension/src/common/shared_widgets.dart";
-import "package:material_ui/material_ui.dart";
+import "package:flutter/material.dart";
 
 class FeatureFlagsPanel extends StatefulWidget {
   const FeatureFlagsPanel({super.key});
