@@ -1,8 +1,10 @@
+import "package:arcane_framework_devtools_extension/src/common/connection_banner.dart";
 import "package:arcane_framework_devtools_extension/src/panels/authentication_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/environment_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/feature_flags_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/logging_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/overview_panel.dart";
+import "package:arcane_framework_devtools_extension/src/panels/services_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/theme_panel.dart";
 import "package:flutter/material.dart";
 
@@ -20,7 +22,7 @@ class _ArcaneDevToolsPageState extends State<ArcaneDevToolsPage>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 6, vsync: this);
+    _tabController = TabController(length: 7, vsync: this);
   }
 
   @override
@@ -33,6 +35,7 @@ class _ArcaneDevToolsPageState extends State<ArcaneDevToolsPage>
   Widget build(BuildContext context) {
     return Column(
       children: [
+        const ConnectionBanner(),
         Material(
           color: Theme.of(context).colorScheme.surface,
           child: TabBar(
@@ -40,6 +43,7 @@ class _ArcaneDevToolsPageState extends State<ArcaneDevToolsPage>
             isScrollable: true,
             tabs: const [
               Tab(text: "Overview", icon: Icon(Icons.dashboard_outlined)),
+              Tab(text: "Services", icon: Icon(Icons.extension_outlined)),
               Tab(
                 text: "Feature Flags",
                 icon: Icon(Icons.flag_outlined),
@@ -59,6 +63,7 @@ class _ArcaneDevToolsPageState extends State<ArcaneDevToolsPage>
             controller: _tabController,
             children: const [
               OverviewPanel(),
+              ServicesPanel(),
               FeatureFlagsPanel(),
               AuthenticationPanel(),
               ThemePanel(),
