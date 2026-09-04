@@ -1,0 +1,5 @@
+analyzer:
+  exclude:
+    - build/**
+    - web/**
+include: package:arcane_analysis/analysis_options.yaml
