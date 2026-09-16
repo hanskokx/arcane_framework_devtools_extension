@@ -1,72 +1,63 @@
-import "package:arcane_framework/arcane_framework.dart";
+import "package:arcane_framework_devtools_extension/src/common/arcane_bridge.dart";
 import "package:arcane_framework_devtools_extension/src/common/shared_widgets.dart";
 import "package:flutter/material.dart";
 
 class OverviewPanel extends StatelessWidget {
-  const OverviewPanel({super.key});
+  const OverviewPanel({required this.bridge, super.key});
+
+  final ArcaneServiceBridge bridge;
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Arcane.registry ?? ValueNotifier<List<ArcaneService>>([]),
+      listenable: bridge,
       builder: (context, _) {
-        final services = Arcane.services;
-        if (services.isEmpty) {
+        final snapshot = bridge.snapshot;
+        if (snapshot == null) {
           return const EmptyState(
-            message: "No Arcane services found.\n"
-                "Ensure ArcaneApp is wrapping your MaterialApp.",
+            message: "No state available yet.\n"
+                "Connect to an arcane_framework app over the VM service.",
           );
         }
         return ListView(
           children: [
             const SectionHeader(title: "Registered Services"),
-            ...services.map(_ServiceTile.new),
+            if (snapshot.services.isEmpty)
+              const EmptyState(message: "No services registered."),
+            ...snapshot.services.map(
+              (type) => ServiceRow(
+                title: type,
+                value: _summary(type, snapshot),
+              ),
+            ),
             const Divider(height: 32),
             const SectionHeader(title: "Logger"),
-            _LoggerInfoTile(logger: Arcane.logger),
+            _LoggerInfoSection(logging: snapshot.logging),
           ],
         );
       },
     );
   }
-}
 
-class _ServiceTile extends StatelessWidget {
-  const _ServiceTile(this.service);
-
-  final ArcaneService service;
-
-  @override
-  Widget build(BuildContext context) {
-    final type = service.runtimeType.toString();
-    String summary;
-    Color? color;
-
-    if (service is ArcaneFeatureFlagService) {
-      final count =
-          (service as ArcaneFeatureFlagService).enabledFeatures.length;
-      summary = "$count flag(s) enabled";
-    } else if (service is ArcaneAuthenticationService) {
-      final status = (service as ArcaneAuthenticationService).status;
-      summary = status.name;
-      color = status.isAuthenticated ? Colors.green : Colors.orange;
-    } else if (service is ArcaneThemeService) {
-      final mode = (service as ArcaneThemeService).currentThemeMode;
-      summary = mode.name;
-    } else if (service is ArcaneEnvironmentService) {
-      summary = (service as ArcaneEnvironmentService).current.name;
-    } else {
-      summary = "active";
+  String _summary(String type, ArcaneSnapshot snapshot) {
+    switch (type) {
+      case "ArcaneFeatureFlagService":
+        return "${snapshot.enabledFeatureFlags.length} flag(s) enabled";
+      case "ArcaneAuthenticationService":
+        return "Status: ${snapshot.auth.status}";
+      case "ArcaneThemeService":
+        return "Mode: ${snapshot.theme.mode}";
+      case "ArcaneEnvironmentService":
+        return "Environment: ${snapshot.environment.name}";
     }
-
-    return ServiceRow(title: type, value: summary, valueColor: color);
+    return "active";
   }
 }
 
-class _LoggerInfoTile extends StatelessWidget {
-  const _LoggerInfoTile({required this.logger});
+class _LoggerInfoSection extends StatelessWidget {
+  const _LoggerInfoSection({required this.logging});
 
-  final ArcaneLogger logger;
+  final LoggingSnapshot logging;
 
   @override
   Widget build(BuildContext context) {
@@ -74,16 +65,16 @@ class _LoggerInfoTile extends StatelessWidget {
       children: [
         ServiceRow(
           title: "Initialized",
-          value: logger.initialized ? "yes" : "no",
-          valueColor: logger.initialized ? Colors.green : Colors.orange,
+          value: logging.initialized ? "yes" : "no",
+          valueColor: logging.initialized ? Colors.green : Colors.orange,
         ),
         ServiceRow(
           title: "Interfaces",
-          value: logger.interfaces.length.toString(),
+          value: logging.interfaces.length.toString(),
         ),
         ServiceRow(
           title: "Persistent metadata",
-          value: logger.additionalMetadata.length.toString(),
+          value: logging.metadata.length.toString(),
         ),
       ],
     );

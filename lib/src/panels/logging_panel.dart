@@ -1,57 +1,93 @@
-import "dart:async";
 import "dart:js_interop";
 
-import "package:arcane_framework/arcane_framework.dart";
+import "package:arcane_framework/arcane_framework.dart" show Level;
+import "package:arcane_framework_devtools_extension/src/common/arcane_bridge.dart";
 import "package:arcane_framework_devtools_extension/src/common/shared_widgets.dart";
 import "package:flutter/material.dart";
 import "package:web/web.dart" as web;
 
 class LoggingPanel extends StatefulWidget {
-  const LoggingPanel({super.key});
+  const LoggingPanel({required this.bridge, super.key});
+
+  final ArcaneServiceBridge bridge;
 
   @override
   State<LoggingPanel> createState() => _LoggingPanelState();
 }
 
 class _LoggingPanelState extends State<LoggingPanel> {
-  final List<_LogEntry> _entries = [];
-  StreamSubscription<String>? _subscription;
+  static const int _maxEntries = 1000;
+
+  final List<ArcaneLogEntry> _entries = [];
+  final Set<int> _knownIds = {};
   Level _minLevel = Level.debug;
   String _searchQuery = "";
   final ScrollController _scrollController = ScrollController();
   bool _autoScroll = true;
   bool _showMetadata = false;
-  LoggingInterface? _selectedInterface;
+  String? _selectedInterface;
 
   @override
   void initState() {
     super.initState();
-    _subscription = Arcane.logger.logStream.listen((message) {
-      final entry = _LogEntry(
-        timestamp: DateTime.now(),
-        message: message,
-      );
-      setState(() => _entries.add(entry));
-      if (_autoScroll && _scrollController.hasClients) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scrollController.hasClients) {
-            _scrollController.jumpTo(
-              _scrollController.position.maxScrollExtent,
-            );
-          }
-        });
-      }
-    });
+    widget.bridge.addListener(_onBridgeChanged);
   }
 
   @override
   void dispose() {
-    _subscription?.cancel();
+    widget.bridge.removeListener(_onBridgeChanged);
     _scrollController.dispose();
     super.dispose();
   }
 
-  List<_LogEntry> get _filteredEntries {
+  void _onBridgeChanged() {
+    if (!mounted) return;
+    if (!widget.bridge.connected) {
+      _entries.clear();
+      _knownIds.clear();
+      setState(() {});
+      return;
+    }
+
+    final logs = widget.bridge.snapshot?.recentLogs ?? const <ArcaneLogEntry>[];
+    final newEntries = [
+      for (final ArcaneLogEntry entry in logs)
+        if (!_knownIds.contains(entry.id)) entry,
+    ]..sort((a, b) => a.id.compareTo(b.id));
+    if (newEntries.isEmpty) {
+      setState(() {});
+      return;
+    }
+
+    setState(() {
+      for (final ArcaneLogEntry entry in newEntries) {
+        _knownIds.add(entry.id);
+        _entries.add(entry);
+      }
+      if (_entries.length > _maxEntries) {
+        final removed =
+            _entries.sublist(0, _entries.length - _maxEntries).toList();
+        _entries.removeRange(0, _entries.length - _maxEntries);
+        _knownIds.removeAll(removed.map((entry) => entry.id));
+      }
+    });
+    _scrollToBottomIfNeeded();
+  }
+
+  void _scrollToBottomIfNeeded() {
+    if (_autoScroll && _scrollController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.jumpTo(
+            _scrollController.position.maxScrollExtent,
+          );
+        }
+      });
+    }
+  }
+
+  List<ArcaneLogEntry> get _filteredEntries {
+    final minValue = _minLevel.value;
     return _entries.where((entry) {
       if (_searchQuery.isNotEmpty &&
           !entry.message.toLowerCase().contains(
@@ -59,8 +95,15 @@ class _LoggingPanelState extends State<LoggingPanel> {
               )) {
         return false;
       }
-      return true;
+      return _levelFromName(entry.level).value >= minValue;
     }).toList();
+  }
+
+  Level _levelFromName(String name) {
+    for (final Level level in Level.values) {
+      if (level.name == name) return level;
+    }
+    return Level.debug;
   }
 
   void _downloadLogs() {
@@ -71,7 +114,8 @@ class _LoggingPanelState extends State<LoggingPanel> {
     final buffer = StringBuffer();
     for (final entry in filtered) {
       buffer.writeln(
-        "[${_formatFullTimestamp(entry.timestamp)}] ${entry.message}",
+        "[${entry.timestamp}] ${entry.level.toUpperCase()} "
+        "${entry.message}",
       );
     }
     final timestamp = DateTime.now()
@@ -84,27 +128,17 @@ class _LoggingPanelState extends State<LoggingPanel> {
     );
   }
 
-  String _formatFullTimestamp(DateTime time) {
-    return "${time.year.toString().padLeft(4, "0")}-"
-        "${time.month.toString().padLeft(2, "0")}-"
-        "${time.day.toString().padLeft(2, "0")} "
-        "${time.hour.toString().padLeft(2, "0")}:"
-        "${time.minute.toString().padLeft(2, "0")}:"
-        "${time.second.toString().padLeft(2, "0")}."
-        "${time.millisecond.toString().padLeft(3, "0")}";
-  }
-
   @override
   Widget build(BuildContext context) {
+    final snapshot = widget.bridge.snapshot;
     final filtered = _filteredEntries;
-    final interfaces = Arcane.logger.interfaces;
-    final metadata = Arcane.logger.additionalMetadata;
+    final logging = snapshot?.logging ?? const LoggingSnapshot.empty();
     return Column(
       children: [
-        if (interfaces.isNotEmpty || metadata.isNotEmpty)
+        if (logging.interfaces.isNotEmpty || logging.metadata.isNotEmpty)
           _LoggerInfoSection(
-            interfaces: interfaces,
-            metadata: metadata,
+            interfaces: logging.interfaces,
+            metadata: logging.metadata,
             selectedInterface: _selectedInterface,
             showMetadata: _showMetadata,
             onInterfaceSelected: (iface) {
@@ -131,7 +165,7 @@ class _LoggingPanelState extends State<LoggingPanel> {
           child: filtered.isEmpty
               ? const EmptyState(
                   message: "No log entries yet.\n"
-                      "Logs from Arcane.log(...) will appear here.",
+                      "Logs from Arcane.log(...) in the connected app appear here.",
                 )
               : ListView.builder(
                   controller: _scrollController,
@@ -157,11 +191,11 @@ class _LoggerInfoSection extends StatelessWidget {
     required this.onToggleMetadata,
   });
 
-  final List<LoggingInterface> interfaces;
+  final List<String> interfaces;
   final Map<String, String> metadata;
-  final LoggingInterface? selectedInterface;
+  final String? selectedInterface;
   final bool showMetadata;
-  final ValueChanged<LoggingInterface> onInterfaceSelected;
+  final ValueChanged<String> onInterfaceSelected;
   final VoidCallback onToggleMetadata;
 
   @override
@@ -185,14 +219,14 @@ class _LoggerInfoSection extends StatelessWidget {
             ),
           if (interfaces.isNotEmpty)
             ...interfaces.map(
-              (iface) => _InterfaceTile(
-                interface: iface,
-                isSelected: selectedInterface == iface,
-                onTap: () => onInterfaceSelected(iface),
+              (type) => _InterfaceTile(
+                type: type,
+                isSelected: selectedInterface == type,
+                onTap: () => onInterfaceSelected(type),
               ),
             ),
           if (selectedInterface != null)
-            _InterfaceDetailCard(interface: selectedInterface!),
+            _InterfaceDetailCard(type: selectedInterface!),
           if (metadata.isNotEmpty) ...[
             InkWell(
               onTap: onToggleMetadata,
@@ -258,21 +292,14 @@ class _LoggerInfoSection extends StatelessWidget {
 
 class _InterfaceTile extends StatelessWidget {
   const _InterfaceTile({
-    required this.interface,
+    required this.type,
     required this.isSelected,
     required this.onTap,
   });
 
-  final LoggingInterface interface;
+  final String type;
   final bool isSelected;
   final VoidCallback onTap;
-
-  String get _interfaceName {
-    if (interface is LoggerName) {
-      return (interface as LoggerName).name;
-    }
-    return interface.runtimeType.toString();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -295,19 +322,12 @@ class _InterfaceTile extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  _interfaceName,
+                  type,
                   style: theme.textTheme.bodyMedium?.copyWith(
                     fontWeight: FontWeight.w500,
                   ),
                 ),
               ),
-              Text(
-                interface.runtimeType.toString(),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(width: 4),
               Icon(
                 isSelected ? Icons.expand_less : Icons.chevron_right,
                 size: 16,
@@ -322,18 +342,13 @@ class _InterfaceTile extends StatelessWidget {
 }
 
 class _InterfaceDetailCard extends StatelessWidget {
-  const _InterfaceDetailCard({required this.interface});
+  const _InterfaceDetailCard({required this.type});
 
-  final LoggingInterface interface;
+  final String type;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final typeName = interface.runtimeType.toString();
-    final name =
-        interface is LoggerName ? (interface as LoggerName).name : "(no name)";
-    final isInitializable = interface is LoggingInitializable;
-
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -348,19 +363,11 @@ class _InterfaceDetailCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _DetailRow(label: "Type", value: typeName),
-          _DetailRow(label: "Name", value: name),
-          _DetailRow(
-            label: "Initializable",
-            value: isInitializable ? "Yes" : "No",
+          _DetailRow(label: "Type", value: type),
+          const _DetailRow(
+            label: "Name",
+            value: "(exposed over VM service as runtime type only)",
           ),
-          if (isInitializable)
-            _DetailRow(
-              label: "Initialized",
-              value: (interface as LoggingInitializable).initialized
-                  ? "Yes"
-                  : "No",
-            ),
         ],
       ),
     );
@@ -401,13 +408,6 @@ class _DetailRow extends StatelessWidget {
       ),
     );
   }
-}
-
-class _LogEntry {
-  _LogEntry({required this.timestamp, required this.message});
-
-  final DateTime timestamp;
-  final String message;
 }
 
 class _LogToolbar extends StatelessWidget {
@@ -517,16 +517,17 @@ class _LogToolbar extends StatelessWidget {
 class _LogEntryTile extends StatelessWidget {
   const _LogEntryTile({required this.entry});
 
-  final _LogEntry entry;
+  final ArcaneLogEntry entry;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         border: Border(
           bottom: BorderSide(
-            color: Theme.of(context).dividerColor.withValues(alpha: 0.3),
+            color: theme.dividerColor.withValues(alpha: 0.3),
           ),
         ),
       ),
@@ -535,18 +536,18 @@ class _LogEntryTile extends StatelessWidget {
         children: [
           Text(
             _formatTime(entry.timestamp),
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  fontFamily: "monospace",
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+            style: theme.textTheme.bodySmall?.copyWith(
+              fontFamily: "monospace",
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               entry.message,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontFamily: "monospace",
-                  ),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: "monospace",
+              ),
               softWrap: true,
             ),
           ),
@@ -555,11 +556,9 @@ class _LogEntryTile extends StatelessWidget {
     );
   }
 
-  String _formatTime(DateTime time) {
-    return "${time.hour.toString().padLeft(2, "0")}:"
-        "${time.minute.toString().padLeft(2, "0")}:"
-        "${time.second.toString().padLeft(2, "0")}."
-        "${time.millisecond.toString().padLeft(3, "0")}";
+  String _formatTime(String iso) {
+    if (iso.length < 24) return iso;
+    return iso.substring(11, 23);
   }
 }
 

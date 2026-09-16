@@ -1,3 +1,4 @@
+import "package:arcane_framework_devtools_extension/src/common/arcane_bridge.dart";
 import "package:arcane_framework_devtools_extension/src/common/connection_banner.dart";
 import "package:arcane_framework_devtools_extension/src/panels/authentication_panel.dart";
 import "package:arcane_framework_devtools_extension/src/panels/environment_panel.dart";
@@ -18,15 +19,18 @@ class ArcaneDevToolsPage extends StatefulWidget {
 class _ArcaneDevToolsPageState extends State<ArcaneDevToolsPage>
     with SingleTickerProviderStateMixin {
   late final TabController _tabController;
+  late final ArcaneServiceBridge _bridge;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 7, vsync: this);
+    _bridge = ArcaneServiceBridge();
   }
 
   @override
   void dispose() {
+    _bridge.dispose();
     _tabController.dispose();
     super.dispose();
   }
@@ -61,14 +65,14 @@ class _ArcaneDevToolsPageState extends State<ArcaneDevToolsPage>
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              OverviewPanel(),
-              ServicesPanel(),
-              FeatureFlagsPanel(),
-              AuthenticationPanel(),
-              ThemePanel(),
-              EnvironmentPanel(),
-              LoggingPanel(),
+            children: [
+              OverviewPanel(bridge: _bridge),
+              ServicesPanel(bridge: _bridge),
+              FeatureFlagsPanel(bridge: _bridge),
+              AuthenticationPanel(bridge: _bridge),
+              ThemePanel(bridge: _bridge),
+              EnvironmentPanel(bridge: _bridge),
+              LoggingPanel(bridge: _bridge),
             ],
           ),
         ),

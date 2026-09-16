@@ -1,93 +1,111 @@
-import "package:arcane_framework/arcane_framework.dart";
+import "package:arcane_framework_devtools_extension/src/common/arcane_bridge.dart";
 import "package:arcane_framework_devtools_extension/src/common/shared_widgets.dart";
 import "package:flutter/material.dart";
 
-class ServicesPanel extends StatefulWidget {
-  const ServicesPanel({super.key});
+class ServicesPanel extends StatelessWidget {
+  const ServicesPanel({required this.bridge, super.key});
 
-  @override
-  State<ServicesPanel> createState() => _ServicesPanelState();
-}
+  final ArcaneServiceBridge bridge;
 
-class _ServicesPanelState extends State<ServicesPanel> {
-  @override
-  void initState() {
-    super.initState();
-    Arcane.registry?.addListener(_onChanged);
-  }
-
-  @override
-  void dispose() {
-    Arcane.registry?.removeListener(_onChanged);
-    super.dispose();
-  }
-
-  void _onChanged() {
-    if (mounted) setState(() {});
-  }
+  static const Set<String> _builtInTypes = {
+    "ArcaneFeatureFlagService",
+    "ArcaneAuthenticationService",
+    "ArcaneThemeService",
+    "ArcaneEnvironmentService",
+  };
 
   @override
   Widget build(BuildContext context) {
-    final services = Arcane.services;
-    if (services.isEmpty) {
-      return const EmptyState(
-        message: "No services registered.\n"
-            "Ensure ArcaneApp is wrapping your MaterialApp.",
-      );
-    }
+    return ListenableBuilder(
+      listenable: bridge,
+      builder: (context, _) {
+        final snapshot = bridge.snapshot;
+        if (snapshot == null) {
+          return const EmptyState(
+            message: "No state available yet.\n"
+                "Connect to an arcane_framework app over the VM service.",
+          );
+        }
+        final services = snapshot.services;
+        if (services.isEmpty) {
+          return const EmptyState(
+            message: "No services registered.",
+          );
+        }
 
-    final builtIn =
-        services.where((s) => _builtInTypes.contains(s.runtimeType)).toList();
-    final user =
-        services.where((s) => !_builtInTypes.contains(s.runtimeType)).toList();
+        final builtIn = services.where(_builtInTypes.contains).toList();
+        final user =
+            services.where((type) => !_builtInTypes.contains(type)).toList();
 
-    return ListView(
-      children: [
-        const SectionHeader(title: "Built-in Services"),
-        if (builtIn.isEmpty)
-          const _NoServicesNotice(message: "No built-in services registered."),
-        ...builtIn.map(_serviceTile),
-        const Divider(height: 32),
-        const SectionHeader(title: "User Services"),
-        if (user.isEmpty)
-          const _NoServicesNotice(
-            message: "No user services registered.",
-          ),
-        ...user.map(_serviceTile),
-      ],
+        return ListView(
+          children: [
+            const SectionHeader(title: "Built-in Services"),
+            if (builtIn.isEmpty)
+              const _NoServicesNotice(
+                message: "No built-in services registered.",
+              ),
+            ...builtIn.map((type) => _serviceCard(context, type, snapshot)),
+            const Divider(height: 32),
+            const SectionHeader(title: "User Services"),
+            if (user.isEmpty)
+              const _NoServicesNotice(message: "No user services registered."),
+            ...user.map((type) => _serviceCard(context, type, snapshot)),
+          ],
+        );
+      },
     );
   }
 
-  static const Set<Type> _builtInTypes = {
-    ArcaneFeatureFlagService,
-    ArcaneAuthenticationService,
-    ArcaneThemeService,
-    ArcaneEnvironmentService,
-  };
+  Widget _serviceCard(
+    BuildContext context,
+    String type,
+    ArcaneSnapshot snapshot,
+  ) {
+    return _ServiceCard(
+      typeName: type,
+      summary: _summary(type, snapshot),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => _ServiceDetailScreen(
+              bridge: bridge,
+              typeName: type,
+            ),
+          ),
+        );
+      },
+    );
+  }
 
-  Widget _serviceTile(ArcaneService service) {
-    final type = service.runtimeType.toString();
-    return _ServiceCard(service: service, typeName: type);
+  String _summary(String type, ArcaneSnapshot snapshot) {
+    switch (type) {
+      case "ArcaneFeatureFlagService":
+        return "${snapshot.enabledFeatureFlags.length} flag(s) enabled";
+      case "ArcaneAuthenticationService":
+        return "Status: ${snapshot.auth.status}";
+      case "ArcaneThemeService":
+        return "Mode: ${snapshot.theme.mode}";
+      case "ArcaneEnvironmentService":
+        return "Environment: ${snapshot.environment.name}";
+    }
+    return "Type: $type";
   }
 }
 
-class _ServiceCard extends StatefulWidget {
-  const _ServiceCard({required this.service, required this.typeName});
+class _ServiceCard extends StatelessWidget {
+  const _ServiceCard({
+    required this.typeName,
+    required this.summary,
+    required this.onTap,
+  });
 
-  final ArcaneService service;
   final String typeName;
+  final String summary;
+  final VoidCallback onTap;
 
-  @override
-  State<_ServiceCard> createState() => _ServiceCardState();
-}
-
-class _ServiceCardState extends State<_ServiceCard> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final service = widget.service;
-    final summary = _summarize(service);
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Material(
@@ -101,7 +119,7 @@ class _ServiceCardState extends State<_ServiceCard> {
         clipBehavior: Clip.antiAlias,
         child: ListTile(
           title: Text(
-            widget.typeName,
+            typeName,
             style: theme.textTheme.bodyMedium?.copyWith(
               fontWeight: FontWeight.w600,
             ),
@@ -115,24 +133,15 @@ class _ServiceCardState extends State<_ServiceCard> {
               ],
               const SizedBox(height: 2),
               Text(
-                "Runtime type: ${service.runtimeType}",
+                "Runtime type: $typeName",
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
             ],
           ),
-          leading: _serviceIcon(service, theme),
-          onTap: () {
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => _ServiceDetailScreen(
-                  service: service,
-                  typeName: widget.typeName,
-                ),
-              ),
-            );
-          },
+          leading: _serviceIcon(typeName, theme),
+          onTap: onTap,
           trailing: Icon(
             Icons.chevron_right,
             size: 18,
@@ -143,25 +152,23 @@ class _ServiceCardState extends State<_ServiceCard> {
     );
   }
 
-  Widget _serviceIcon(ArcaneService service, ThemeData theme) {
+  Widget _serviceIcon(String typeName, ThemeData theme) {
     final IconData icon;
-    final Color color;
-    if (service is ArcaneFeatureFlagService) {
-      icon = Icons.flag_outlined;
-      color = theme.colorScheme.primary;
-    } else if (service is ArcaneAuthenticationService) {
-      icon = Icons.person_outline;
-      color = theme.colorScheme.primary;
-    } else if (service is ArcaneThemeService) {
-      icon = Icons.palette_outlined;
-      color = theme.colorScheme.primary;
-    } else if (service is ArcaneEnvironmentService) {
-      icon = Icons.public_outlined;
-      color = theme.colorScheme.primary;
-    } else {
-      icon = Icons.extension_outlined;
-      color = theme.colorScheme.secondary;
+    switch (typeName) {
+      case "ArcaneFeatureFlagService":
+        icon = Icons.flag_outlined;
+      case "ArcaneAuthenticationService":
+        icon = Icons.person_outline;
+      case "ArcaneThemeService":
+        icon = Icons.palette_outlined;
+      case "ArcaneEnvironmentService":
+        icon = Icons.public_outlined;
+      default:
+        icon = Icons.extension_outlined;
     }
+    final color = icon == Icons.extension_outlined
+        ? theme.colorScheme.secondary
+        : theme.colorScheme.primary;
     return Container(
       width: 36,
       height: 36,
@@ -172,32 +179,12 @@ class _ServiceCardState extends State<_ServiceCard> {
       child: Icon(icon, size: 20, color: color),
     );
   }
-
-  String _summarize(ArcaneService service) {
-    if (service is ArcaneFeatureFlagService) {
-      return "${service.enabledFeatures.length} flag(s) enabled";
-    }
-    if (service is ArcaneAuthenticationService) {
-      final status = service.status;
-      return "Status: ${status.name}";
-    }
-    if (service is ArcaneThemeService) {
-      return "Mode: ${service.currentThemeMode.name}";
-    }
-    if (service is ArcaneEnvironmentService) {
-      return "Environment: ${service.current.name}";
-    }
-    return "Type: ${service.runtimeType}";
-  }
 }
 
 class _ServiceDetailScreen extends StatelessWidget {
-  const _ServiceDetailScreen({
-    required this.service,
-    required this.typeName,
-  });
+  const _ServiceDetailScreen({required this.bridge, required this.typeName});
 
-  final ArcaneService service;
+  final ArcaneServiceBridge bridge;
   final String typeName;
 
   @override
@@ -205,95 +192,100 @@ class _ServiceDetailScreen extends StatelessWidget {
     final theme = Theme.of(context);
     return Material(
       color: theme.colorScheme.surface,
-      child: Column(
-        children: [
-          Material(
-            color: theme.colorScheme.surface,
-            child: Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-                Expanded(
-                  child: Text(
-                    typeName,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              children: [
-                _DetailBlock(
-                  title: "Runtime Type",
+      child: ListenableBuilder(
+        listenable: bridge,
+        builder: (context, _) {
+          final snapshot = bridge.snapshot;
+          return Column(
+            children: [
+              Material(
+                color: theme.colorScheme.surface,
+                child: Row(
                   children: [
-                    const _DetailItem(label: "Type", value: "Custom"),
-                    _DetailItem(label: "Actual Type", value: typeName),
-                    const _DetailItem(label: "Disposable", value: "Yes"),
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                    Expanded(
+                      child: Text(
+                        typeName,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                _DetailBlock(
-                  title: "Service State",
-                  children: _stateItems(),
+              ),
+              Expanded(
+                child: ListView(
+                  children: [
+                    _DetailBlock(
+                      title: "Runtime Type",
+                      children: [
+                        const _DetailItem(label: "Type", value: "Service"),
+                        _DetailItem(label: "Actual Type", value: typeName),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    if (snapshot != null)
+                      _DetailBlock(
+                        title: "Service State",
+                        children: _stateItems(snapshot),
+                      ),
+                  ],
                 ),
-              ],
-            ),
-          ),
-        ],
+              ),
+            ],
+          );
+        },
       ),
     );
   }
 
-  List<Widget> _stateItems() {
-    if (service is ArcaneFeatureFlagService) {
-      final s = service as ArcaneFeatureFlagService;
-      final features = s.enabledFeatures;
-      return [
-        _DetailItem(label: "Enabled Flags", value: features.length.toString()),
-        if (features.isEmpty)
-          const _DetailItem(label: "Flags", value: "(none)")
-        else
-          ...features.map(
-            (f) => _DetailItem(label: f.runtimeType.toString(), value: f.name),
+  List<Widget> _stateItems(ArcaneSnapshot snapshot) {
+    switch (typeName) {
+      case "ArcaneFeatureFlagService":
+        final flags = snapshot.enabledFeatureFlags;
+        return [
+          _DetailItem(label: "Enabled Flags", value: flags.length.toString()),
+          if (flags.isEmpty)
+            const _DetailItem(label: "Flags", value: "(none)")
+          else
+            ...flags.map((flag) => _DetailItem(label: "Flag", value: flag)),
+        ];
+      case "ArcaneAuthenticationService":
+        return [
+          _DetailItem(label: "Status", value: snapshot.auth.status),
+          _DetailItem(
+            label: "Signed In",
+            value: snapshot.auth.isSignedIn.toString(),
           ),
-      ];
-    }
-    if (service is ArcaneAuthenticationService) {
-      final s = service as ArcaneAuthenticationService;
-      return [
-        _DetailItem(label: "Status", value: s.status.name),
-        _DetailItem(label: "Signed In", value: s.isSignedIn.value.toString()),
-        _DetailItem(
-          label: "Interface",
-          value: s.authInterface?.runtimeType.toString() ?? "(none)",
-        ),
-      ];
-    }
-    if (service is ArcaneThemeService) {
-      final s = service as ArcaneThemeService;
-      return [
-        _DetailItem(label: "Mode", value: s.currentThemeMode.name),
-        _DetailItem(
-          label: "Following System",
-          value: s.isFollowingSystemTheme.toString(),
-        ),
-      ];
-    }
-    if (service is ArcaneEnvironmentService) {
-      final s = service as ArcaneEnvironmentService;
-      return [
-        _DetailItem(label: "Environment", value: s.current.name),
-        _DetailItem(
-          label: "Is Debug",
-          value: s.current.isDebug.toString(),
-        ),
-      ];
+          _DetailItem(
+            label: "Interface",
+            value: snapshot.auth.interfaceType ?? "(none)",
+          ),
+        ];
+      case "ArcaneThemeService":
+        return [
+          _DetailItem(label: "Mode", value: snapshot.theme.mode),
+          _DetailItem(
+            label: "Following System",
+            value: snapshot.theme.followingSystem.toString(),
+          ),
+          _DetailItem(
+            label: "Custom Themes",
+            value: snapshot.theme.customThemeRegistered ? "Yes" : "No",
+          ),
+        ];
+      case "ArcaneEnvironmentService":
+        return [
+          _DetailItem(label: "Environment", value: snapshot.environment.name),
+          _DetailItem(
+            label: "Is Debug",
+            value: snapshot.environment.isDebug.toString(),
+          ),
+        ];
     }
     return const [
       _DetailItem(label: "Custom service", value: "No standard state"),

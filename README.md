@@ -1,70 +1,279 @@
 # arcane_framework_devtools_extension
 
-A DevTools extension for [arcane_framework](https://pub.dev/packages/arcane_framework)
-that lets you inspect live runtime state — feature flags, authentication, theme,
-environment, logging, and registered services — directly from DevTools.
+A [DevTools extension](https://docs.flutter.dev/tools/devtools/extensions) for
+[arcane_framework](https://github.com/hanskokx/arcane_framework) that inspects a
+running app's live runtime state — feature flags, authentication, theme,
+environment, logging, and registered services — directly from Dart & Flutter
+DevTools.
 
-This package is the **Flutter web app** (source of the extension). It is a companion
-to the `arcane_framework` package, which hosts the built extension assets at
-`arcane_framework/extension/devtools/`. End-users get this extension automatically
-by depending on `arcane_framework`.
+This package is the **Flutter web app that is the extension's source**. It is a
+companion to the `arcane_framework` package, which **hosts the pre-built
+extension assets** at `arcane_framework/extension/devtools/`. End users get the
+extension automatically by depending on `arcane_framework`; they never touch
+this package directly.
 
-## Layout
+> Docs status: accurate against `arcane_framework_devtools_extension` 1.0.0 and
+> `arcane_framework` 3.0.0-dev.1.
+
+---
+
+## Table of contents
+
+- [arcane\_framework\_devtools\_extension](#arcane_framework_devtools_extension)
+  - [Table of contents](#table-of-contents)
+  - [What the extension shows](#what-the-extension-shows)
+  - [How it works](#how-it-works)
+    - [RPC protocol](#rpc-protocol)
+    - [Transport note](#transport-note)
+  - [Repository layout](#repository-layout)
+  - [Prerequisites](#prerequisites)
+  - [Getting started](#getting-started)
+  - [Development loop](#development-loop)
+    - [Analysis and formatting](#analysis-and-formatting)
+    - [Tests](#tests)
+    - [Simulated DevTools environment](#simulated-devtools-environment)
+    - [Running against a real DevTools environment](#running-against-a-real-devtools-environment)
+  - [End-to-end validation over the VM service](#end-to-end-validation-over-the-vm-service)
+  - [Building the extension](#building-the-extension)
+  - [Troubleshooting](#troubleshooting)
+  - [Resources](#resources)
+
+---
+
+## What the extension shows
+
+Seven tabs, all fed by the `ArcaneServiceBridge`:
+
+| Tab           | Content                                                                                                                                      |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Overview      | One-glance summary of every subsystem (services, flags, auth, theme, env, recent log count).                                                 |
+| Services      | Names of all registered `Arcane.service`/framework services.                                                                                 |
+| Feature Flags | Names of the enabled `Enum` feature flags (read-only).                                                                                       |
+| Auth          | `AuthenticationStatus`, `isSignedIn`, and the auth interface type; buttons to flip between `authenticated` and `unauthenticated`.            |
+| Theme         | Current `ThemeMode`, whether it follows the system, and whether a custom theme is registered; buttons to switch `light` / `dark` / `system`. |
+| Environment   | Current environment name and whether debug mode is on; buttons to toggle `debug` / `normal`.                                                 |
+| Logs          | Live log stream (buffer-capped at 500 entries), level badges, metadata, and a "download logs" action.                                        |
+
+Design decisions worth knowing:
+
+- **Feature-flag toggles are intentionally absent.** Flag *names* are readable,
+  but the framework stores typed `Enum`s; reconstructing toggle semantics from a
+  name string would be lossy. The extension is read-only for feature flags.
+- All UI uses `package:flutter/material.dart`. It must — the extension renders
+  inside DevTools' Flutter-based `MaterialApp`, so `material_ui` widgets would
+  hit `No MaterialLocalizations found`. See `TODO.md` for the full `material_ui`
+  incompatibility write-up.
+- The bridge polls every 2 seconds while connected, so a mutation made in the
+  app (or from another tool) shows up within one poll cycle. Mutating buttons
+  trigger an immediate re-poll after the call.
+
+---
+
+## How it works
+
+The extension is wrapped in `DevToolsExtension` (from `package:devtools_extensions`),
+which initializes the shared globals `serviceManager` and `dtdManager`.
+`ArcaneServiceBridge` (`lib/src/common/arcane_bridge.dart`) listens to
+`serviceManager.connectedState` and `serviceManager.isolateManager.mainIsolate`.
+When an app is connected, it polls the app's VM service.
+
+On the app side, `arcane_framework` **registers one service extension
+automatically** — no app code required. `ArcaneApp` calls
+`ArcaneServiceExtensions.register()` in `initState`, which registers
+`ext.arcane.devtools.invoke` on the current isolate (idempotent across hot
+reloads) and attaches an `ArcaneLogBuffer` to the logger to retain recent log
+events.
+
+### RPC protocol
+
+The protocol mirrors the framework's consolidated invoke pattern: a single
+extension with a `method` + `params` dispatch, and a structured result/error
+envelope.
+
+**Extension name:** `ext.arcane.devtools.invoke`
+
+**Request args** (both strings):
+
+| arg      | value                                                                                            |
+| -------- | ------------------------------------------------------------------------------------------------ |
+| `method` | the method name (see table below)                                                                |
+| `params` | a JSON-encoded object, e.g. `{"mode":"dark"}`. Omit or pass `{}` for methods without parameters. |
+
+**Response envelope** (JSON, frame-encoded once):
+
+```json
+{ "type": "result", "result": { ...method payload... } }
+```
+
+or, on failure:
+
+```json
+{ "type": "error", "error": "Invalid argument(s) (mode): ..." }
+```
+
+**Methods:**
+
+| Method            | params                                           | returns                                                   |
+| ----------------- | ------------------------------------------------ | --------------------------------------------------------- |
+| `ping`            | —                                                | `{status: "ok", extension: "ext.arcane.devtools.invoke"}` |
+| `overview`        | —                                                | the full snapshot payload (below)                         |
+| `set_auth_status` | `{status: "authenticated" \| "unauthenticated"}` | auth state                                                |
+| `set_environment` | `{name: "debug" \| "normal"}`                    | environment state                                         |
+| `set_theme_mode`  | `{mode: "light" \| "dark" \| "system"}`          | theme state                                               |
+
+Purely invalid inputs (unknown method, malformed `params` JSON, or an out-of-range
+value) are caught server-side and reported as `{type: "error", ...}` rather than
+crashing the service extension call.
+
+**`overview` payload shape:**
+
+```jsonc
+{
+  "services": ["CartService", "..."],
+  "logging": {
+    "initialized": true,
+    "interfaces": ["_ArcaneLogCollector"],
+    "metadata": {}
+  },
+  "featureFlags": { "enabled": ["experimentalUI", "analytics"] },
+  "auth": { "status": "authenticated", "isSignedIn": true, "interfaceType": null },
+  "theme": { "mode": "dark", "followingSystem": false, "customThemeRegistered": false },
+  "environment": { "name": "debug", "isDebug": true },
+  "recentLogs": [
+    {
+      "id": 0,
+      "timestamp": "2026-09-06T09:14:29.988",
+      "level": "info",
+      "module": "Heartbeat",
+      "method": null,
+      "message": "heartbeat #1",
+      "metadata": { "tick": 1 }
+    }
+  ]
+}
+```
+
+"State" payloads (auth/environment/theme) return the corresponding subsection
+after the mutation has been applied, so a caller can confirm the change without a
+follow-up `overview`.
+
+### Transport note
+
+The envelope is **not** laid out identically across transports:
+
+- **Native VM service** (`flutter run` on a device/desktop): the service
+  extension returns a JSON *string* as `result`; `response.json["result"]` is a
+  `String`. DevTools then needs to `jsonDecode` it once to get the envelope.
+- **DWDS / Chrome** (web apps): the web layer already decodes the payload, so
+  `response.json["result"]` arrives as a **map** — and the outer envelope is
+  stripped. For `ping` you see `{status: "ok", ...}` directly, not
+  `{type: "result", result: {...}}`.
+
+`ArcaneServiceBridge._invoke` normalizes both shapes. If you write your own
+probe/tool against this extension, handle both, or you will see "no data" only
+on web. This is the single most common integration bug (we hit it, fixed it).
+
+---
+
+## Repository layout
 
 ```
-arcane/                         # repository root
-  arcane_framework/            # the package users depend on (hosts the extension)
-    extension/
-      devtools/
-        build/                 # pre-compiled extension output (copied here)
-        config.yaml
-  arcane_framework_devtools_extension/   # this package (extension web app source)
+arcane/                                     # repository root
+  arcane_framework/                         # the package users depend on
+    extension/devtools/                     # hosts the pre-built extension
+      build/                                #   pre-compiled web output (gitignored)
+      config.yaml                           #   extension metadata for DevTools
+    lib/                                    # framework source (registers the extension)
+    pubspec.yaml
+  arcane_framework_devtools_extension/      # <-- this package
     lib/
-    web/
+      main.dart                             # ArcaneDevToolsExtension (DevToolsExtension)
+      src/
+        arcane_devtools_page.dart           # banner + 7-tab shell
+        common/
+          arcane_bridge.dart                # polling, parsing, mutations
+          connection_banner.dart
+          shared_widgets.dart
+        panels/                             # one file per tab
+    web/                                    # Flutter web shell (index.html, manifest)
+    pubspec.yaml                            # publish_to: none
+    README.md                               # this file
+    TODO.md                                 # material_ui incompatibility notes
 ```
+
+---
 
 ## Prerequisites
 
-- Flutter stable (>= 3.23) and Dart >= 3.5
-- Chrome available for `flutter run -d chrome`
+- **Flutter stable** `>= 3.23` and **Dart SDK** `>= 3.5`
+  (developed against Flutter 3.47.2 / Dart 3.13.2).
+- **Chrome** available on `PATH` for `flutter run -d chrome`.
+- Both sibling packages checked out, so the path dependencies resolve:
+  - `arcane_framework` (extension source for the protocol + registrar),
+  - `arcane_framework_devtools_extension` (this package).
 
-## Getting dependencies
+---
+
+## Getting started
 
 ```sh
+cd arcane_framework_devtools_extension
 flutter pub get
 ```
 
-## Running tests & analysis
+`pubspec.yaml` pins `devtools_extensions ^0.5.0`, `devtools_app_shared ^0.5.0`,
+and `vm_service ^15.3.0`. The extension imports the real `arcane_framework` via
+a path dependency (used for types/logging only — see "No public API" below).
+
+> **No public API added to `arcane_framework`.** Everything the extension reads
+> goes over the VM service. The framework exposes zero extra API surface for
+> DevTools; theme state helpers live in a `part` file and are hidden from the
+> barrel.
+
+---
+
+## Development loop
+
+### Analysis and formatting
+
+The package lints with [`arcane_analysis`](https://github.com/hanskokx/arcane_analysis)
+(`analysis_options.yaml`). Gate everything on the analyzer being clean:
 
 ```sh
+dart format lib test
 dart analyze
-dart test
-dart format --set-exit-if-changed lib test
 ```
 
-This project uses [arcane_analysis](https://github.com/hanskokx/arcane_analysis) for
-linting (see `analysis_options.yaml`).
+`dart analyze` is the **primary quality gate** — see the test caveat below.
 
-## Manually testing the extension
+### Tests
 
-During development, run the extension in the **simulated DevTools environment**. This
-wraps the extension with a mock DevTools connection so you can iterate with hot restart
-instead of embedding it in DevTools:
+```sh
+flutter test
+```
+
+Known caveat: `flutter test` currently fails to *compile* the test suite because
+of a pre-existing `devtools_app_shared` / `dart:js_interop` incompatibility on
+this Flutter/Dart version (`test/widget_test.dart` is a trivial smoke test that
+does not run). Treat **`dart analyze` as the gate**, and keep `widget_test.dart`
+updated so it works whenever the upstream incompatibility is resolved.
+
+### Simulated DevTools environment
+
+The fastest dev loop. Wraps the extension in the `SimulatedDevToolsWrapper` —
+a mock DevTools shell with a VM-service URI field, action buttons
+(`PING`, `TOGGLE THEME`, `FORCE RELOAD`), and a message log. Hot restart works.
 
 ```sh
 flutter run -d chrome --dart-define=use_simulated_environment=true
 ```
 
-The simulated environment shows your extension next to a panel you can use to:
+The URI field must point at a **running app that depends on `arcane_framework`**
+(after connecting, paste the app's `Debug service listening on ws://…/ws` URI).
+The connection banner at the top of the extension flips to "connected" and the
+panels populate.
 
-- Connect to a VM service URI (a test app that depends on `arcane_framework`)
-- Trigger actions a user might perform from DevTools (`PING`, `TOGGLE THEME`, `FORCE RELOAD`)
-- See the messages passed between the extension and DevTools
-
-### Running the same config from VS Code
-
-Add a launch configuration to `.vscode/launch.json` in a workspace rooted at this
-package:
+Same config from VS Code — `.vscode/launch.json` at this package's root:
 
 ```json
 {
@@ -80,68 +289,11 @@ package:
 }
 ```
 
-### Testing against a real DevTools environment
+### Running against a real DevTools environment
 
-To exercise the extension the way real users will, use the published layout in
-`arcane_framework` (see [Building the extension](#building-the-extension) first to
-copy the built assets):
-
-1. Open a test Flutter/Dart project that depends on `arcane_framework` via a path
-   or local dependency.
-2. Run the test app (if `requiresConnection` is true, as configured) and open DevTools
-   from the IDE, the printed URI, or the CLI instructions.
-3. Look for the extension's tab in the DevTools app bar. Whether it is enabled is
-   controlled from the "Extensions" menu in the upper-right corner of DevTools.
-
-## Building the extension
-
-Build the Flutter web app and copy its output into `arcane_framework/extension/devtools`
-following the standard DevTools extensions workflow:
-
-```sh
-cd arcane_framework_devtools_extension
-flutter pub get
-dart run devtools_extensions build_and_copy \
-  --source=. \
-  --dest=../arcane_framework/extension/devtools
-```
-
-Validate that the extension is wired up correctly for loading in DevTools:
-
-```sh
-dart run devtools_extensions validate --package=../arcane_framework
-```
-
-> Note: `arcane_framework/extension/devtools/build/` is gitignored. To ensure the
-> built output is still bundled when `arcane_framework` is published, add a
-> `.pubignore` containing `!build` inside `arcane_framework/extension/devtools/`.
-
-## Publishing the extension
-
-The DevTools extension is **not published from this package** — it ships with
-`arcane_framework`. Before publishing `arcane_framework`, make sure:
-
-1. `arcane_framework/extension/devtools/config.yaml` exists and is configured
-   (name, `issueTracker`, `version`, `materialIconCodePoint`).
-2. The built assets are present in `arcane_framework/extension/devtools/build/`
-   (run `build_and_copy` as described above).
-3. `dart run devtools_extensions validate --package=../arcane_framework` passes.
-
-Then publish `arcane_framework` from its own directory:
-
-```sh
-cd ../arcane_framework
-flutter pub publish
-```
-
-`pub publish` warns if `config.yaml` or a non-empty `build/` directory is missing.
-
-## Adding a development version of the extension to VS Code
-
-VS Code integrates with DevTools extensions for Dart/Flutter projects that depend on
-the parent package. To develop against an unreleased `arcane_framework`:
-
-1. In a Flutter/Dart project, add a path dependency on your local `arcane_framework`:
+1. Build and copy the extension into `arcane_framework` first
+   ([Building the extension](#building-the-extension)).
+2. In any Flutter/Dart project, depend on your local `arcane_framework`:
 
    ```yaml
    dependencies:
@@ -149,37 +301,116 @@ the parent package. To develop against an unreleased `arcane_framework`:
        path: /absolute/path/to/arcane/arcane_framework
    ```
 
-   then run `flutter pub get` (or `dart pub get`).
+   then `flutter pub get`.
 
-2. Make sure the local `arcane_framework/extension/devtools/build/` is up to date
-   (see [Building the extension](#building-the-extension)).
+3. Run that app. Because `config.yaml` sets `requiresConnection: true`, launch
+   the app and open DevTools from the IDE, the printed DevTools URI, or the CLI
+   instructions.
+4. The extension appears as an **Arcane** tab in the DevTools app bar. Enable it
+   from the **Extensions** menu (upper-right) on first use, if prompted.
 
-3. Open the test project in VS Code and run it:
-   - **If the extension requires a connection** (current config has
-     `requiresConnection: true`), launch the app and open DevTools from VS Code or the
-     printed URI.
-   - **If it doesn't require a connection**, open DevTools directly on the project.
-   The extension tab appears in DevTools.
+DevTools **caches** the extension's built assets aggressively. After changing
+extension code and re-running `build_and_copy`, reload/restart DevTools
+completely — the extension tab is an embedded iFrame and the old build persists
+until DevTools itself is reloaded.
 
-## Updating the development version of the extension in VS Code
+---
 
-After editing code in this package, push the latest build to `arcane_framework` and
-reload:
+## End-to-end validation over the VM service
+
+The most reliable smoke test — it bypasses the extension UI and verifies the
+protocol against the live app, which is especially important because of the
+[string-vs-map transport quirk](#transport-note).
+
+1. Launch a Chrome app that depends on `arcane_framework`:
+
+   ```sh
+   flutter run -d chrome --verbose
+   # note the line: Debug service listening on ws://127.0.0.1:PORT/TOKEN/ws
+   ```
+
+2. Probe it over the VM service. In a scratch Dart CLI package with
+   `vm_service` and `web_socket_channel` deps:
+
+   ```dart
+   import 'dart:convert';
+   import 'package:vm_service/vm_service.dart' as vm;
+   import 'package:web_socket_channel/web_socket_channel.dart';
+
+   Future<void> main(List<String> args) async {
+     final ws = WebSocketChannel.connect(Uri.parse(args[0]));
+     final service = vm.VmService(ws.stream, (m) => ws.sink.add(m));
+     final isolate = (await service.getVM()).isolates!.first;
+
+     Future<void> invoke(String method, [Map<String, Object?>? params]) async {
+       final res = await service.callServiceExtension(
+         'ext.arcane.devtools.invoke',
+         isolateId: isolate.id!,
+         args: {'method': method, 'params': jsonEncode(params ?? const {})},
+       );
+       final raw = res.json?['result'];                        // DWDS: map, native: String
+       final decoded = raw is String ? jsonDecode(raw) : raw;
+       print('$method -> $decoded');
+     }
+
+     await invoke('ping');
+     await invoke('overview');
+     await invoke('set_theme_mode', {'mode': 'dark'});
+     await invoke('set_auth_status', {'status': 'authenticated'});
+     await invoke('set_theme_mode', {'mode': 'banana'});       // expect error envelope
+     await invoke('does_not_exist');                            // expect error envelope
+   }
+   ```
+
+3. Verify: `ping` returns `status: ok`; `overview` returns all seven sections
+   plus recent logs; mutations round-trip and are visible on the next `overview`;
+   negative cases return `{type: "error", ...}` instead of throwing an RPCError.
+
+A ready-to-run probe plus a heartbeat target app are kept under
+`/tmp/opencode/arcane_bridge_probe` and `/tmp/opencode/arcane_target_app`
+(throwaway, outside the repo).
+
+---
+
+## Building the extension
+
+Build instructions and the full release workflow live in the
+[arcane_framework CONTRIBUTING.md][framework-contrib]. In short, run the
+publish gate, which rebuilds the extension and validates it before the
+framework ships:
 
 ```sh
-flutter pub get
-dart run devtools_extensions build_and_copy \
-  --source=. \
-  --dest=../arcane_framework/extension/devtools
+cd arcane_framework
+dart run tool/publish.dart --dry-run
 ```
 
-Then reload/restart DevTools in VS Code so it picks up the new copy in
-`arcane_framework/extension/devtools/build/` (DevTools caches the built assets, so a
-full DevTools reload is usually required). If `arcane_framework` itself changed (e.g.
-new API surface the extension reads), run `flutter pub get` in the test project as well.
+That compiles `lib/main.dart` for web via `devtools_extensions build_and_copy`,
+replaces `arcane_framework/extension/devtools/build/` (including the canvaskit
+permissions fix), validates the result, then dry-runs the framework publish.
+
+---
+
+## Troubleshooting
+
+| Symptom                                                      | Cause / fix                                                                                                                                                                                    |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Extension shows "No app connected" forever.                  | The app isn't connected to this DevTools instance (`requiresConnection: true`). Run the app and open DevTools from its URI/IDE.                                                                |
+| Panels render but show "No state available yet."             | The bridge is connected but `overview` returned nothing. Usually the transport quirk: if you hand-rolled a probe, handle both String and Map `result` (see [Transport note](#transport-note)). |
+| Mutations fail with `{type:"error"}`.                        | Server-side validation rejects the value (e.g. `mode: "banana"`). This is expected and reported cleanly.                                                                                       |
+| Extension tab still shows the OLD UI after rebuild.          | DevTools caches extension assets. Fully reload/restart DevTools.                                                                                                                               |
+| `flutter test` fails to compile.                             | Pre-existing `devtools_app_shared` / `dart:js_interop` incompatibility; use `dart analyze` as the gate.                                                                                        |
+| `flutter run -d chrome` print-less output / no `ws://` line. | Run with `--verbose`; the "Debug service listening on `ws://…`" line appears in verbose output.                                                                                                |
+| `No MaterialLocalizations found` in extension UI.            | Extension should only use `flutter/material.dart` widgets, never `material_ui` (see `TODO.md`).                                                                                                |
+| Missing `build/` in the published framework archive.         | `extension/devtools/.pubignore` is absent — add a `.pubignore` containing `!build` inside `arcane_framework/extension/devtools/`.                                                              |
+
+---
 
 ## Resources
 
-- [DevTools Extensions documentation](https://docs.flutter.dev/tools/devtools/extensions)
-- [devtools_extensions package](https://pub.dev/packages/devtools_extensions)
-- [devtools_app_shared package](https://pub.dev/packages/devtools_app_shared)
+- [DevTools extensions docs](https://docs.flutter.dev/tools/devtools/extensions)
+- [Build custom DevTools tooling](https://docs.flutter.dev/tools/devtools/custom-tool)
+- [`devtools_extensions` on pub.dev](https://pub.dev/packages/devtools_extensions)
+- [`devtools_app_shared` on pub.dev](https://pub.dev/packages/devtools_app_shared)
+- [DevTools extension config spec](https://github.com/flutter/devtools/blob/master/packages/devtools_extensions/extension_config_spec.md)
+- [arcane_framework](https://github.com/hanskokx/arcane_framework)
+- [framework-contrib]: https://github.com/hanskokx/arcane_framework/blob/main/CONTRIBUTING.md
